@@ -8,6 +8,8 @@ modules.order
 Module.symvers
 __pycache__/
 *.pkg.tar.*
+*.tar.gz
+*.tar.xz
 src/
 pkg/
 build.log
