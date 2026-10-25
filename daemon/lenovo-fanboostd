@@ -1,0 +1,186 @@
+#!/usr/bin/python3 -I
+"""lenovo-fanboostd: policy daemon (run by systemd). Raises the fan early from CPU Tctl.
+
+Users should run the `lenovo-fanboost` CLI instead.
+
+Talks only to the lenovo_fanboost hwmon (fan1_target). Never requests less
+than automatic: target is either 0 (EC control) or a fixed level.
+"""
+import argparse
+import glob
+import os
+import signal
+import sys
+import time
+import tomllib
+
+MAX_RPM = 4000
+LEVELS = {"low": 0.60, "medium": 0.80, "high": 1.00}
+DEFAULTS = {"on": 70.0, "off": 60.0, "hold": 15.0, "level": "medium",
+            "interval": 0.5}
+CONFIG = "/etc/lenovo-fanboost.toml"
+HWMON_ROOT = "/sys/class/hwmon"
+
+
+def find_hwmon(name, root=HWMON_ROOT):
+    for p in sorted(glob.glob(os.path.join(root, "hwmon*", "name"))):
+        try:
+            with open(p) as f:
+                if f.read().strip() == name:
+                    return os.path.dirname(p)
+        except OSError:
+            pass
+    return None
+
+
+def level_rpm(level):
+    return int(MAX_RPM * LEVELS[level])
+
+
+def load_config(path):
+    cfg = dict(DEFAULTS)
+    try:
+        with open(path, "rb") as f:
+            cfg.update(tomllib.load(f).get("fanboost", {}))
+    except FileNotFoundError:
+        pass
+    unknown = set(cfg) - set(DEFAULTS)
+    if unknown:
+        raise ValueError(f"unknown keys: {sorted(unknown)}")
+    return validate(cfg)
+
+
+def validate(cfg):
+    if cfg["level"] not in LEVELS:
+        raise ValueError(f"level must be one of {sorted(LEVELS)}")
+    for k in ("on", "off", "hold", "interval"):
+        cfg[k] = float(cfg[k])
+    if not 30 <= cfg["off"] < cfg["on"] <= 95:
+        raise ValueError("need 30 <= off < on <= 95")
+    if cfg["hold"] < 0 or not 0.05 <= cfg["interval"] <= 10:
+        raise ValueError("hold >= 0 and 0.05 <= interval <= 10")
+    return cfg
+
+
+class Fan:
+    def __init__(self, hwmon):
+        self.target = os.path.join(hwmon, "fan1_target")
+
+    def set(self, rpm):
+        with open(self.target, "w") as f:
+            f.write(f"{int(rpm)}\n")
+
+    def get(self):
+        with open(self.target) as f:
+            return int(f.read())
+
+
+class Controller:
+    """Hysteresis: boost at temp >= on; release after hold s below off."""
+
+    def __init__(self, cfg):
+        self.on, self.off, self.hold = cfg["on"], cfg["off"], cfg["hold"]
+        self.rpm = level_rpm(cfg["level"])
+        self.boosted = False
+        self.below_since = None
+
+    def step(self, temp, now):
+        """Return 'boost', 'auto' or None (no change)."""
+        if not self.boosted:
+            if temp >= self.on:
+                self.boosted, self.below_since = True, None
+                return "boost"
+        elif temp < self.off:
+            if self.below_since is None:
+                self.below_since = now
+            if now - self.below_since >= self.hold:
+                self.boosted = False
+                return "auto"
+        else:
+            self.below_since = None
+        return None
+
+    def fault(self):
+        """Sensor unavailable: hand back to the EC."""
+        was, self.boosted, self.below_since = self.boosted, False, None
+        return "auto" if was else None
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def apply(fan, ctl, action, temp):
+    rpm = ctl.rpm if action == "boost" else 0
+    fan.set(rpm)
+    log(f"{action} tctl={temp:.1f} target={rpm}")
+
+
+def run(cfg, fan, read_temp, clock=time.monotonic, sleep=time.sleep,
+        stop=lambda: False):
+    ctl = Controller(cfg)
+    fan.set(0)
+    log(f"start on={cfg['on']} off={cfg['off']} hold={cfg['hold']} "
+        f"level={cfg['level']} rpm={ctl.rpm}")
+    faulted = False
+    try:
+        while not stop():
+            try:
+                t = read_temp()
+                if faulted:
+                    log("sensor recovered")
+                faulted = False
+            except (OSError, ValueError):
+                if not faulted:
+                    log("sensor error, releasing to auto")
+                faulted = True
+                if ctl.fault():
+                    fan.set(0)
+                sleep(cfg["interval"])
+                continue
+            action = ctl.step(t, clock())
+            if action:
+                apply(fan, ctl, action, t)
+            sleep(cfg["interval"])
+    finally:
+        try:
+            fan.set(0)
+            log("exit: fan returned to automatic")
+        except OSError as e:
+            log(f"exit: failed to write auto: {e}")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--config", default=CONFIG)
+    ap.add_argument("--hwmon-root", default=HWMON_ROOT)
+    a = ap.parse_args(argv)
+    try:
+        cfg = load_config(a.config)
+    except (ValueError, tomllib.TOMLDecodeError, OSError) as e:
+        sys.exit(f"config error: {e}")
+    fh = find_hwmon("lenovo_fanboost", a.hwmon_root)
+    kt = find_hwmon("k10temp", a.hwmon_root)
+    if not fh or not kt:
+        sys.exit("hwmon lenovo_fanboost or k10temp not found")
+    if not os.access(os.path.join(fh, "fan1_target"), os.W_OK):
+        sys.exit("lenovo-fanboostd is the system daemon and needs root.\n"
+                 "It normally runs as lenovo-fanboost.service; use the "
+                 "`lenovo-fanboost` command to check or change it.")
+    tpath = os.path.join(kt, "temp1_input")
+
+    def read_temp():
+        with open(tpath) as f:
+            return int(f.read()) / 1000
+
+    def term(*_):
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, term)
+    signal.signal(signal.SIGINT, term)
+    signal.signal(signal.SIGHUP, term)
+    run(cfg, Fan(fh), read_temp)
+
+
+if __name__ == "__main__":
+    main()

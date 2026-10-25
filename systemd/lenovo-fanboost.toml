@@ -1,0 +1,7 @@
+# /etc/lenovo-fanboost.toml
+[fanboost]
+on = 65.0        # boost when Tctl >= on (C)
+off = 55.0       # release after Tctl < off for `hold` seconds
+hold = 15.0
+level = "high"   # low 60% / medium 80% / high 100% of 4000 rpm (validated: high 65/55)
+interval = 0.5
