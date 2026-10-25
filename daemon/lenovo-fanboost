@@ -1,0 +1,139 @@
+#!/usr/bin/python3 -I
+"""lenovo-fanboost: check and control the fan boost service.
+
+  lenovo-fanboost [status]           show service, level and fan state
+  lenovo-fanboost watch              live status, once per second
+  lenovo-fanboost level LEVEL        set low|medium|high and restart (root)
+  lenovo-fanboost on | off           enable or disable the service (root)
+
+The fan policy itself runs in lenovo-fanboostd (lenovo-fanboost.service).
+"""
+import argparse
+import glob
+import os
+import re
+import subprocess
+import sys
+import time
+import tomllib
+
+SERVICE = "lenovo-fanboost.service"
+CONFIG = "/etc/lenovo-fanboost.toml"
+HWMON_ROOT = "/sys/class/hwmon"
+LEVELS = ("low", "medium", "high")
+
+
+def find_hwmon(name, root):
+    for p in sorted(glob.glob(os.path.join(root, "hwmon*", "name"))):
+        try:
+            with open(p) as f:
+                if f.read().strip() == name:
+                    return os.path.dirname(p)
+        except OSError:
+            pass
+    return None
+
+
+def rd(d, n):
+    if not d:
+        return None
+    try:
+        with open(os.path.join(d, n)) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def systemctl(*args):
+    r = subprocess.run(["systemctl", *args], capture_output=True, text=True)
+    return r.returncode, r.stdout.strip()
+
+
+def read_config(path):
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f).get("fanboost", {})
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+
+
+def status_line(a):
+    fan = find_hwmon("lenovo_fanboost", a.hwmon_root)
+    kt = find_hwmon("k10temp", a.hwmon_root)
+    t = rd(kt, "temp1_input")
+    target = rd(fan, "fan1_target")
+    mode = "boost" if target not in (None, "0") else "auto"
+    return (f"cpu {int(t) / 1000:5.1f}°C  fan {mode:5}  target {target or '-':>4} rpm  "
+            f"ec speed {rd(fan, 'fan1_raw') or '-'}") if t else "sensors unavailable"
+
+
+def cmd_status(a):
+    _, active = systemctl("is-active", SERVICE)
+    _, enabled = systemctl("is-enabled", SERVICE)
+    cfg = read_config(a.config)
+    print(f"service  {active} ({enabled})")
+    print(f"level    {cfg.get('level', '?')}  boost at {cfg.get('on', '?')}°C, "
+          f"release below {cfg.get('off', '?')}°C for {cfg.get('hold', '?')} s")
+    if not find_hwmon("lenovo_fanboost", a.hwmon_root):
+        print("module   not loaded (sudo modprobe lenovo_fanboost)")
+    print(status_line(a))
+
+
+def cmd_watch(a):
+    try:
+        while True:
+            print(f"{time.strftime('%T')}  {status_line(a)}", flush=True)
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+
+
+def need_root(cmd):
+    if os.geteuid() != 0:
+        sys.exit(f"this needs root: sudo lenovo-fanboost {cmd}")
+
+
+def cmd_level(a):
+    need_root(f"level {a.level}")
+    with open(a.config) as f:
+        text = f.read()
+    new, n = re.subn(r'(?m)^(\s*level\s*=\s*)"[a-z]+"', rf'\g<1>"{a.level}"', text)
+    if not n:
+        new = text.rstrip("\n") + f'\nlevel = "{a.level}"\n'
+    tomllib.loads(new)
+    with open(a.config, "w") as f:
+        f.write(new)
+    rc, active = systemctl("is-active", SERVICE)
+    if active == "active":
+        systemctl("restart", SERVICE)
+    print(f"level set to {a.level}" + (" (service restarted)" if active == "active" else ""))
+
+
+def cmd_onoff(a):
+    need_root(a.cmd)
+    verb = "enable" if a.cmd == "on" else "disable"
+    rc, _ = systemctl(verb, "--now", SERVICE)
+    if rc:
+        sys.exit(f"systemctl {verb} failed")
+    print(f"fan boost {'enabled' if a.cmd == 'on' else 'disabled; fan back to automatic'}")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="lenovo-fanboost", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--config", default=CONFIG, help=argparse.SUPPRESS)
+    ap.add_argument("--hwmon-root", default=HWMON_ROOT, help=argparse.SUPPRESS)
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("status")
+    sub.add_parser("watch")
+    lv = sub.add_parser("level")
+    lv.add_argument("level", choices=LEVELS)
+    sub.add_parser("on")
+    sub.add_parser("off")
+    a = ap.parse_args(argv)
+    {None: cmd_status, "status": cmd_status, "watch": cmd_watch, "level": cmd_level,
+     "on": cmd_onoff, "off": cmd_onoff}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()
