@@ -20,16 +20,12 @@ The project is split into three main parts:
 
 Writing arbitrary values to unfamiliar ACPI methods or EC registers can lock up laptop firmware. Because of this, the driver will not load generically: it enforces a strict DMI whitelist and checks for the required ACPI method before registering hardware.
 
-### Verified models
+### Supported models
 - **Lenovo ThinkBook 14 G7 ARP** (`21MV`, BIOS `P6CN38WW`)
+- **Lenovo ThinkBook 16 G7 ARP** (`21NW`)
 
 ### Adding more models
-Lenovo uses different ACPI IDs and EC offsets across model generations. Adding a new chassis safely requires:
-1. **DSDT table verification**: Examining `acpidump` tables to see if the machine exposes `WMLA` or the `VPC2004` device with matching thermal IDs (`0x04030001`).
-2. **Reverse engineering ITS**: Inspecting Lenovo's Windows Intelligent Thermal Solution (ITS) driver packages to verify the command payloads and EC status registers for that model.
-3. **Hardware validation**: Adding the verified DMI identity to the driver and confirming that stopping the service (`0`) reliably returns control to the EC without unexpected behavior.
-
-If you have a different Lenovo laptop and want to help test compatibility, feel free to open an issue with your `acpidump` and `dmidecode` output.
+Detailed model tiers and instructions for testing new hardware are documented in [ROADMAP.md](ROADMAP.md). If you have another Lenovo laptop (ThinkBook, IdeaPad Pro, or Yoga) and want to test compatibility, open an issue with your `acpidump` and `dmidecode` output.
 
 ## Usage
 

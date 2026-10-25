@@ -20,20 +20,24 @@
 #include <linux/sysfs.h>
 #include <linux/unaligned.h>
 
-#define FB_METHOD	"\\_SB.WMI5.WMLA"
-#define FB_SET_CMD	0x12
-#define FB_SID_FAN1	0x04030001
-#define FB_MAX_RPM	4000
-#define FB_EC_FAN_REG	0x95
+struct lenovo_fan_quirk {
+	const char *ident;
+	const char *method;
+	u32 set_cmd;
+	u32 sid_fan1;
+	u16 max_rpm;
+	u8 ec_fan_reg;
+};
 
 static unsigned int rpm_per_unit;
 module_param(rpm_per_unit, uint, 0444);
-MODULE_PARM_DESC(rpm_per_unit, "RPM per EC 0x95 unit; fan1_input exists only if non-zero (unverified, ~50)");
+MODULE_PARM_DESC(rpm_per_unit, "RPM per EC unit; fan1_input exists only if non-zero (unverified, ~50)");
 
 struct fb_data {
 	acpi_handle handle;
 	struct mutex lock;	/* serializes requests and target */
 	long target;
+	const struct lenovo_fan_quirk *quirk;
 };
 
 static struct platform_device *fb_pdev;
@@ -45,12 +49,12 @@ static int fb_request(struct fb_data *d, u32 rpm)
 	u8 buf[8];
 	acpi_status st;
 
-	put_unaligned_le32(FB_SID_FAN1, buf);
+	put_unaligned_le32(d->quirk->sid_fan1, buf);
 	put_unaligned_le32(rpm, buf + 4);
 	args[0].type = ACPI_TYPE_INTEGER;
 	args[0].integer.value = 0;
 	args[1].type = ACPI_TYPE_INTEGER;
-	args[1].integer.value = FB_SET_CMD;
+	args[1].integer.value = d->quirk->set_cmd;
 	args[2].type = ACPI_TYPE_BUFFER;
 	args[2].buffer.length = sizeof(buf);
 	args[2].buffer.pointer = buf;
@@ -62,8 +66,9 @@ static int fb_request(struct fb_data *d, u32 rpm)
 static ssize_t fan1_raw_show(struct device *dev, struct device_attribute *attr,
 			     char *buf)
 {
+	struct fb_data *d = dev_get_drvdata(dev);
 	u8 v;
-	int ret = ec_read(FB_EC_FAN_REG, &v);
+	int ret = ec_read(d->quirk->ec_fan_reg, &v);
 
 	if (ret)
 		return ret;
@@ -100,7 +105,7 @@ static int fb_read(struct device *dev, enum hwmon_sensor_types type, u32 attr,
 
 	switch (attr) {
 	case hwmon_fan_input:
-		ret = ec_read(FB_EC_FAN_REG, &v);
+		ret = ec_read(d->quirk->ec_fan_reg, &v);
 		if (ret)
 			return ret;
 		*val = (long)v * rpm_per_unit;
@@ -123,7 +128,7 @@ static int fb_write(struct device *dev, enum hwmon_sensor_types type, u32 attr,
 	if (attr != hwmon_fan_target)
 		return -EOPNOTSUPP;
 
-	val = clamp_val(val, 0, FB_MAX_RPM);
+	val = clamp_val(val, 0, d->quirk->max_rpm);
 	mutex_lock(&d->lock);
 	ret = fb_request(d, val);
 	if (!ret)
@@ -156,16 +161,64 @@ static void fb_release(struct fb_data *d)
 	mutex_unlock(&d->lock);
 }
 
+/* Quirks definitions */
+static const struct lenovo_fan_quirk quirk_thinkbook_14_g7 = {
+	.ident = "ThinkBook 14 G7 ARP",
+	.method = "\\_SB.WMI5.WMLA",
+	.set_cmd = 0x12,
+	.sid_fan1 = 0x04030001,
+	.max_rpm = 4000,
+	.ec_fan_reg = 0x95,
+};
+
+static const struct lenovo_fan_quirk quirk_thinkbook_16_g7 = {
+	.ident = "ThinkBook 16 G7 ARP",
+	.method = "\\_SB.WMI5.WMLA",
+	.set_cmd = 0x12,
+	.sid_fan1 = 0x04030001,
+	.max_rpm = 4000,
+	.ec_fan_reg = 0x95,
+};
+
+static const struct dmi_system_id lenovo_fanboost_dmi_table[] = {
+	{
+		.ident = "ThinkBook 14 G7 ARP",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "21MV"),
+		},
+		.driver_data = (void *)&quirk_thinkbook_14_g7,
+	},
+	{
+		.ident = "ThinkBook 16 G7 ARP",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "21NW"),
+		},
+		.driver_data = (void *)&quirk_thinkbook_16_g7,
+	},
+	{ }
+};
+MODULE_DEVICE_TABLE(dmi, lenovo_fanboost_dmi_table);
+
 static int fb_probe(struct platform_device *pdev)
 {
+	const struct dmi_system_id *dmi_id;
 	struct device *hwdev;
 	struct fb_data *d;
 	acpi_status st;
 
+	dmi_id = dmi_first_match(lenovo_fanboost_dmi_table);
+	if (!dmi_id || !dmi_id->driver_data)
+		return -ENODEV;
+
 	d = devm_kzalloc(&pdev->dev, sizeof(*d), GFP_KERNEL);
 	if (!d)
 		return -ENOMEM;
-	st = acpi_get_handle(NULL, FB_METHOD, &d->handle);
+
+	d->quirk = dmi_id->driver_data;
+
+	st = acpi_get_handle(NULL, d->quirk->method, &d->handle);
 	if (ACPI_FAILURE(st))
 		return -ENODEV;
 	mutex_init(&d->lock);
@@ -205,26 +258,19 @@ static struct platform_driver fb_driver = {
 	.shutdown = fb_shutdown,
 };
 
-static const struct dmi_system_id fb_dmi[] = {
-	{
-		.ident = "ThinkBook 14 G7 ARP",
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "21MV"),
-		},
-	},
-	{ }
-};
-MODULE_DEVICE_TABLE(dmi, fb_dmi);
-
 static int __init fb_init(void)
 {
+	const struct dmi_system_id *dmi_id;
+	const struct lenovo_fan_quirk *quirk;
 	acpi_handle h;
 	int ret;
 
-	if (!dmi_check_system(fb_dmi))
+	dmi_id = dmi_first_match(lenovo_fanboost_dmi_table);
+	if (!dmi_id || !dmi_id->driver_data)
 		return -ENODEV;
-	if (ACPI_FAILURE(acpi_get_handle(NULL, FB_METHOD, &h)))
+
+	quirk = dmi_id->driver_data;
+	if (ACPI_FAILURE(acpi_get_handle(NULL, quirk->method, &h)))
 		return -ENODEV;
 
 	ret = platform_driver_register(&fb_driver);
