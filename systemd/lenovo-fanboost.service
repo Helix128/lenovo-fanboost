@@ -1,0 +1,33 @@
+[Unit]
+Description=Lenovo fanboost policy daemon (ThinkBook 14 G7 ARP)
+After=systemd-modules-load.service
+ConditionPathExists=/etc/lenovo-fanboost.toml
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/lenovo-fanboost/lenovo-fanboostd
+# Always hand the fan back to the EC, even after a crash. "-" ignores failure.
+ExecStopPost=/bin/sh -c 'for d in /sys/class/hwmon/hwmon*; do [ "$(cat $d/name 2>/dev/null)" = lenovo_fanboost ] && echo 0 > $d/fan1_target; done; exit 0'
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+# /sys is read-only under ProtectSystem=strict (only /sys/class/hwmon is rewritten here);
+# the hwmon dirs resolve under /sys/devices/platform/lenovo_fanboost.
+ReadWritePaths=-/sys/devices/platform/lenovo_fanboost
+
+[Install]
+WantedBy=multi-user.target
