@@ -18,7 +18,7 @@ optdepends=(
 install=lenovo-fanboost.install
 backup=('etc/lenovo-fanboost.toml')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('6836c998af1f4a1182e9906267cce9bfbb91b540023e4ebc9989f69a7cdca4ed')
+sha256sums=('36e183677dbae601958e86bd38a7b8873cd80d8284b2ed4e1343fc88477c7c63')
 
 package() {
   cd "$pkgname-$pkgver"
