@@ -1,5 +1,5 @@
 [Unit]
-Description=Lenovo fanboost policy daemon (ThinkBook 14 G7 ARP)
+Description=Lenovo fanboost policy daemon
 After=systemd-modules-load.service
 ConditionPathExists=/etc/lenovo-fanboost.toml
 

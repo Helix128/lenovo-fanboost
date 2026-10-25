@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * lenovo_fanboost - fan speed request/readback for ThinkBook 14 G7 ARP (21MV)
+ * lenovo_fanboost - fan speed request/readback for Lenovo laptops
  *
  * Mechanism only. Requests a fan speed through the firmware WMI method
  * \_SB.WMI5.WMLA(0, 0x12, {SIDS=0x04030001, SVAL=rpm}); rpm 0 returns the fan
@@ -254,5 +254,5 @@ module_init(fb_init);
 module_exit(fb_exit);
 
 MODULE_AUTHOR("lenovo-fanboost contributors");
-MODULE_DESCRIPTION("Fan speed request for Lenovo ThinkBook 14 G7 ARP (21MV)");
+MODULE_DESCRIPTION("Fan speed request driver for Lenovo laptops");
 MODULE_LICENSE("GPL");

@@ -1,5 +1,5 @@
 pkgbase = lenovo-fanboost
-	pkgdesc = Fan control and boost daemon for Lenovo ThinkBook 14 G7 ARP (21MV)
+	pkgdesc = Fan control and boost daemon for Lenovo laptops (DKMS)
 	pkgver = 0.1.0
 	pkgrel = 1
 	url = https://github.com/Helix128/lenovo-fanboost

@@ -2,7 +2,7 @@
 pkgname=lenovo-fanboost
 pkgver=0.1.0
 pkgrel=1
-pkgdesc='Fan control and boost daemon for Lenovo ThinkBook 14 G7 ARP (21MV)'
+pkgdesc='Fan control and boost daemon for Lenovo laptops (DKMS)'
 arch=('any')
 url='https://github.com/Helix128/lenovo-fanboost'
 license=('GPL-2.0-only')

@@ -1,28 +1,33 @@
 # lenovo-fanboost
 
-Linux fan control for the Lenovo ThinkBook 14 G7 ARP (DMI product `21MV`). The daemon reads CPU temperature and requests a fan level through the laptop's firmware.
+Linux fan control utility for Lenovo laptops. It pairs an out-of-tree kernel module (exposing a standard `hwmon` interface via ACPI/WMI) with a lightweight userspace daemon that monitors CPU temperatures and spins up the fan during sustained workloads, before handing control back to the EC.
 
-## Scope and status
+Initial hardware verification was done on the Lenovo ThinkBook 14 G7 ARP (`21MV`). Because Lenovo shares ACPI layouts and ITS (Intelligent Thermal Solution) logic across several families, the broader goal is to systematically support other ThinkBook, Yoga, and IdeaPad models.
 
-The fan-control path has been verified on DMI product `21MV` (Lenovo ThinkBook 14 G7 ARP) with BIOS `P6CN38WW`. The kernel module enforces strict DMI matching and verifies the required ACPI method before binding to prevent unintended writes to unsupported hardware.
+## How it works
 
-## Compatibility roadmap
+On modern Lenovo laptops, the Embedded Controller (EC) handles thermal curves in hardware, but often ramps fans up too late during sudden compute spikes.
 
-Expanding support to additional Lenovo laptops (ThinkBook, Yoga, and IdeaPad lines) follows a strict reverse-engineering and validation workflow:
+This driver talks directly to Lenovo's ACPI methods (specifically `WMLA` over `\_SB.WMI5`) to set a target fan speed. Writing a target RPM engages the fan, while writing `0` hands control straight back to the EC. The daemon monitors `k10temp` (Tctl) and applies hysteresis: fans kick in early under heavy load and return to automatic control once temperatures drop and stay below the threshold for a cooldown period.
 
-1. **Safety-first DMI whitelist**: Writing arbitrary registers on the Embedded Controller (EC) can disrupt platform firmware. Every newly supported chassis will be gated behind verified DMI match entries.
-2. **Firmware analysis (ACPI/WMI & ITS)**:
-   - Correlating vendor Windows Intelligent Thermal Solution (ITS) drivers with Linux platform interfaces.
-   - Disassembling DSDT/SSDT tables to verify WMI method availability (`WMLA`, `VPC2004`) and fan control capability bits.
-3. **Community diagnostics**:
-   - Diagnostic tools and instructions to capture `acpidump`, DMI identifiers, and `hwmon` sensor topology without risk to hardware.
-4. **Target models under evaluation**:
-   - ThinkBook 14 / 16 G6 & G7 series (AMD / Intel).
-   - Yoga Slim and IdeaPad models sharing compatible ACPI/EC thermal hooks.
+## Compatibility and roadmap
 
-## Install
+Writing blindly to ACPI methods or EC registers on unsupported laptops can cause firmware lockups or unexpected power states. For this reason, the kernel driver uses a strict DMI whitelist rather than binding generically.
 
-On Arch or CachyOS, install the package with DKMS, kernel headers, and the compiler tools for the installed kernel:
+### Verified models
+- **Lenovo ThinkBook 14 G7 ARP** (DMI product `21MV`, BIOS `P6CN38WW`)
+
+### Roadmap for other Lenovo laptops
+Lenovo adjusts ACPI IDs and EC offsets across model generations. Adding new hardware safely requires:
+1. **DSDT inspection**: Verifying whether the target laptop implements the `WMLA` ACPI method or `VPC2004` device with matching fan control IDs (such as `0x04030001`).
+2. **Reverse engineering ITS**: Analyzing Lenovo's Windows ITS packages to confirm command payloads and EC status registers for each chassis.
+3. **Quirk integration**: Adding tested DMI matches and chassis-specific quirks to the driver once validated with community `acpidump` data.
+
+If you have a different Lenovo laptop and want to help test compatibility, feel free to open an issue with your `acpidump` and `dmidecode` output.
+
+## Installation
+
+On Arch Linux or CachyOS, you can install the package using DKMS:
 
 ```sh
 cd packaging
@@ -30,19 +35,19 @@ makepkg -si
 sudo lenovo-fanboost on
 ```
 
-DKMS selects clang/lld/llvm for clang-built kernels and gcc for gcc-built kernels. For a manual build on a clang-built kernel, run `make -C kernel LLVM=1`.
+DKMS automatically picks clang/lld/llvm for clang-built kernels and gcc for standard kernels. If building manually on a clang-built kernel, run `make -C kernel LLVM=1`.
 
-## Use
+## Usage
 
 ```sh
-lenovo-fanboost                 # show service, level, temperature, and fan status
-lenovo-fanboost watch           # refresh status every second
-sudo lenovo-fanboost level high # choose low, medium, or high
-sudo lenovo-fanboost off        # disable the service and return control to the EC
-sudo lenovo-fanboost on         # enable the service now and at boot
+lenovo-fanboost                 # Show service state, temperature, and current fan target
+lenovo-fanboost watch           # Live view (refreshes every second)
+sudo lenovo-fanboost level high # Set profile: low, medium, or high
+sudo lenovo-fanboost off        # Stop service and return fan control to EC
+sudo lenovo-fanboost on         # Enable service now and at system boot
 ```
 
-The installed configuration is `/etc/lenovo-fanboost.toml`:
+The configuration file is installed at `/etc/lenovo-fanboost.toml`:
 
 ```toml
 [fanboost]
@@ -53,27 +58,25 @@ level = "high"
 interval = 0.5
 ```
 
-The daemon reads Tctl from `k10temp`. It requests a fan boost when Tctl reaches `on`, then returns to automatic control after Tctl stays below `off` for `hold` seconds. `interval` sets the polling interval. Low, medium, and high request 60%, 80%, and 100% of 4000 rpm. Change the level with the CLI; restart the service after editing the file.
+The daemon reads Tctl from `k10temp`. When temperature reaches `on`, it boosts the fan. Once temperature drops below `off` and stays there for `hold` seconds, it returns the fan to automatic EC control. Low, medium, and high correspond to roughly 60%, 80%, and 100% of maximum fan speed (4000 RPM).
 
 ## Hardware interface
 
-The kernel module exposes a hwmon device named `lenovo_fanboost`:
+The kernel module registers a `hwmon` device named `lenovo_fanboost`:
 
-- `fan1_target` accepts requests from 0 to 4000 rpm. A value of 0 returns control to the EC. Reading the file shows the last successful request, not measured fan speed.
-- `fan1_raw` reads the raw EC value at `0x95`; its rpm scale is not confirmed.
-- Optional `fan1_input` converts the raw value with `rpm_per_unit=N`. The result is an estimate, not a verified tachometer reading.
+- `fan1_target`: Accepts requests from 0 to 4000 RPM. Writing `0` restores automatic EC control. Reading it shows the last requested target.
+- `fan1_raw`: Reads the raw EC value at register `0x95`.
+- `fan1_input`: Optional attribute that converts the raw reading into estimated RPM if `rpm_per_unit` is configured.
 
-## Lenovo ITS
+## Safety and recovery
 
-Lenovo publishes separate Windows Intelligent Thermal Solution (ITS) packages for models including the [S340](https://support.lenovo.com/gb/en/downloads/ds506314), [Yoga Slim 7](https://support.lenovo.com/gb/en/downloads/ds549491), and [Yoga 6](https://support.lenovo.com/kr/ko/downloads/ds551850). These listings do not establish compatibility with this Linux driver.
+The module automatically requests EC control at load time and releases control before unload, shutdown, or suspend. The daemon does the same on exit or if the temperature sensor fails. Built-in CPU and EC thermal protections remain untouched and take priority at all times.
 
-Static analysis of ITS 5.0.2510.1 on the `21MV` found thermal and power mode changes, but no fan command. The fan request used by this project was checked separately through WMI/ACPI: EC readback changed after a request, and `0` returned control to the EC.
+To manually restore automatic fan control at any time:
 
-## Recovery and removal
-
-The module requests automatic control at startup and before removal, shutdown, or suspend. The daemon does the same on exit or sensor failure, and the systemd service attempts a reset when it stops. EC and CPU firmware thermal protections remain active.
-
-To restore automatic control manually, write `0` to `fan1_target` on the hwmon device named `lenovo_fanboost`.
+```sh
+echo 0 | sudo tee /sys/class/hwmon/hwmon*/fan1_target
+```
 
 To uninstall:
 
@@ -83,8 +86,8 @@ sudo modprobe -r lenovo_fanboost
 sudo pacman -R lenovo-fanboost
 ```
 
-## Tests and license
+## Testing and license
 
-Run `python -I -m unittest`. Tests use a temporary fake hwmon tree and do not access hardware.
+Run tests with `python -I -m unittest`. The suite mocks the `hwmon` filesystem tree and does not interact with physical hardware.
 
 Licensed under GPL-2.0-only. See [LICENSE](LICENSE).
