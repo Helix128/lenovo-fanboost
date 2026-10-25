@@ -16,6 +16,6 @@ pkgbase = lenovo-fanboost
 	optdepends = linux-headers: headers for stock Arch kernel
 	backup = etc/lenovo-fanboost.toml
 	source = lenovo-fanboost-0.1.0.tar.gz::https://github.com/Helix128/lenovo-fanboost/archive/refs/tags/v0.1.0.tar.gz
-	sha256sums = 753881ade7bcf146710c93e955bf44dc5aca76f65e5e84b852fe5fbfcc9d9046
+	sha256sums = 6836c998af1f4a1182e9906267cce9bfbb91b540023e4ebc9989f69a7cdca4ed
 
 pkgname = lenovo-fanboost
