@@ -1,0 +1,37 @@
+# Maintainer: local
+pkgname=lenovo-fanboost
+pkgver=0.1.0
+pkgrel=3
+pkgdesc='Fan pre-spin for Lenovo ThinkBook 14 G7 ARP (21MV): kernel module (DKMS) + policy daemon'
+arch=('any')
+url='https://localhost/lenovo-fanboost'
+license=('GPL-2.0-only')
+depends=('python' 'dkms')
+# CachyOS kernels are built with clang/LLVM: DKMS builds with LLVM=1 (dkms.conf),
+# so clang, lld and llvm must be present, plus headers of the installed kernel(s).
+makedepends=()
+optdepends=('clang: build the module for clang-built kernels (CachyOS default)'
+            'lld: needed with clang'
+            'llvm: needed with clang'
+            'gcc: build the module for gcc-built kernels (CachyOS LTS)'
+            'linux-cachyos-headers: headers for the CachyOS kernel'
+            'linux-headers: headers for the stock kernel (needs gcc if not clang-built)')
+install=lenovo-fanboost.install
+backup=('etc/lenovo-fanboost.toml')
+source=()
+_root="${startdir}/.."
+
+package() {
+  install -Dm755 "$_root/daemon/lenovo-fanboost"  "$pkgdir/usr/bin/lenovo-fanboost"
+  install -Dm755 "$_root/daemon/lenovo-fanboostd" "$pkgdir/usr/lib/lenovo-fanboost/lenovo-fanboostd"
+  install -Dm644 "$_root/systemd/lenovo-fanboost.service" \
+    "$pkgdir/usr/lib/systemd/system/lenovo-fanboost.service"
+  install -Dm644 "$_root/systemd/lenovo-fanboost.modules-load.conf" \
+    "$pkgdir/usr/lib/modules-load.d/lenovo-fanboost.conf"
+  install -Dm644 "$_root/systemd/lenovo-fanboost.toml" "$pkgdir/etc/lenovo-fanboost.toml"
+
+  local d="$pkgdir/usr/src/$pkgname-$pkgver"
+  install -Dm644 "$_root/kernel/lenovo_fanboost.c" "$d/lenovo_fanboost.c"
+  install -Dm644 "$_root/kernel/dkms.conf"         "$d/dkms.conf"
+  printf 'obj-m += lenovo_fanboost.o\n' > "$d/Makefile"
+}
