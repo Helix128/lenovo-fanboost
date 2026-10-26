@@ -20,20 +20,14 @@ fb = load("lenovo-fanboostd")
 cli = load("lenovo-fanboost")
 
 
-def cfg(**kw):
-    c = dict(fb.DEFAULTS, hold=10.0)
-    c.update(kw)
-    return fb.validate(c)
-
-
 class FakeHwmon:
-    def __init__(self, case):
+    def __init__(self, case, max_rpm=4000):
         self.tmp = tempfile.TemporaryDirectory()
         case.addCleanup(self.tmp.cleanup)
         self.root = self.tmp.name
         for i, (n, files) in enumerate([
                 ("k10temp", {"temp1_input": "40000\n"}),
-                ("lenovo_fanboost", {"fan1_target": "0\n", "fan1_raw": "7\n"})]):
+                ("lenovo_fanboost", {"fan1_target": "0\n", "fan1_raw": "7\n", "fan1_max": f"{max_rpm}\n"})]):
             d = os.path.join(self.root, f"hwmon{i}")
             os.mkdir(d)
             with open(os.path.join(d, "name"), "w") as f:
@@ -48,43 +42,69 @@ class FakeHwmon:
             return int(f.read())
 
 
-class ControllerTests(unittest.TestCase):
-    def test_boost_at_threshold(self):
-        c = fb.Controller(cfg())
-        self.assertIsNone(c.step(69.9, 0))
-        self.assertEqual(c.step(70.0, 1), "boost")
-        self.assertIsNone(c.step(75, 2))
+class CurveTests(unittest.TestCase):
+    def test_interpolate_percent_bounds(self):
+        pts = [[50, 0], [60, 40], [80, 80], [90, 100]]
+        self.assertEqual(fb.interpolate_percent(pts, 40), 0.0)
+        self.assertEqual(fb.interpolate_percent(pts, 50), 0.0)
+        self.assertEqual(fb.interpolate_percent(pts, 95), 100.0)
 
-    def test_hold_and_release(self):
-        c = fb.Controller(cfg())
-        c.step(80, 0)
-        self.assertIsNone(c.step(59, 1))      # below off, hold starts
-        self.assertIsNone(c.step(59, 10.9))
-        self.assertEqual(c.step(59, 11), "auto")
+    def test_interpolate_percent_linear(self):
+        pts = [[50, 0], [70, 50], [90, 100]]
+        self.assertAlmostEqual(fb.interpolate_percent(pts, 60), 25.0)
+        self.assertAlmostEqual(fb.interpolate_percent(pts, 70), 50.0)
+        self.assertAlmostEqual(fb.interpolate_percent(pts, 80), 75.0)
 
-    def test_hysteresis_band_keeps_boost_and_resets_hold(self):
-        c = fb.Controller(cfg())
-        c.step(80, 0)
-        c.step(55, 1)
-        self.assertIsNone(c.step(65, 5))      # in band: hold timer reset
-        self.assertIsNone(c.step(55, 6))
-        self.assertIsNone(c.step(55, 15))     # only 9 s since restart
-        self.assertEqual(c.step(55, 16), "auto")
+    def test_percent_to_rpm(self):
+        self.assertEqual(fb.percent_to_rpm(0, 4000), 0)
+        self.assertEqual(fb.percent_to_rpm(100, 4000), 4000)
+        self.assertEqual(fb.percent_to_rpm(50, 4000), 2000)
+        # Test custom hardware max rpm (e.g. 5000)
+        self.assertEqual(fb.percent_to_rpm(50, 5000), 2500)
+        # Test rounding to 50 RPM steps
+        # 33% of 4000 = 1320 -> round to 1300
+        self.assertEqual(fb.percent_to_rpm(33, 4000), 1300)
 
-    def test_levels(self):
-        self.assertEqual(fb.level_rpm("low"), 2400)
-        self.assertEqual(fb.level_rpm("medium"), 3200)
-        self.assertEqual(fb.level_rpm("high"), 4000)
+    def test_curve_controller_steps(self):
+        pts = [[50, 0], [60, 50], [80, 100]]
+        c = fb.CurveController(pts, max_rpm=4000)
+        self.assertIsNone(c.step(45))  # target 0, already 0
+        self.assertEqual(c.step(60), 2000)  # changes to 2000
+        self.assertIsNone(c.step(60))  # unchanged
+        self.assertEqual(c.step(80), 4000)  # changes to 4000
+        self.assertEqual(c.step(40), 0)  # return to EC auto
 
-    def test_never_exceeds_max_or_below_auto(self):
-        for lv in fb.LEVELS:
-            self.assertTrue(0 < fb.level_rpm(lv) <= 4000)
+    def test_curve_controller_fault(self):
+        pts = [[50, 0], [60, 50]]
+        c = fb.CurveController(pts, max_rpm=4000)
+        c.step(60)
+        self.assertEqual(c.current_target, 2000)
+        self.assertEqual(c.fault(), 0)
+        self.assertIsNone(c.fault())
 
-    def test_validation(self):
-        with self.assertRaises(ValueError):
-            cfg(on=60, off=60)
-        with self.assertRaises(ValueError):
-            cfg(level="turbo")
+
+class ConfigTests(unittest.TestCase):
+    def test_load_default_profiles(self):
+        cfg = fb.load_config("/nonexistent.toml")
+        self.assertEqual(cfg["profile"], "Balanced")
+        self.assertIn("Balanced", cfg["profiles"])
+        self.assertIn("Quiet", cfg["profiles"])
+        self.assertIn("Aggressive", cfg["profiles"])
+
+    def test_legacy_level_mapping(self):
+        with tempfile.NamedTemporaryFile("w+", suffix=".toml") as f:
+            f.write('[fanboost]\nlevel = "high"\n')
+            f.flush()
+            cfg = fb.load_config(f.name)
+            self.assertEqual(cfg["profile"], "Aggressive")
+
+    def test_custom_profile_loading(self):
+        with tempfile.NamedTemporaryFile("w+", suffix=".toml") as f:
+            f.write('[fanboost]\nprofile = "Custom"\n\n[profiles.Custom]\npoints = [[30, 0], [80, 100]]\n')
+            f.flush()
+            cfg = fb.load_config(f.name)
+            self.assertEqual(cfg["profile"], "Custom")
+            self.assertEqual(cfg["points"], [[30.0, 0.0], [80.0, 100.0]])
 
 
 class RunTests(unittest.TestCase):
@@ -96,7 +116,7 @@ class RunTests(unittest.TestCase):
         def read():
             count[0] += 1
             if fail_at is not None and count[0] == fail_at:
-                raise OSError("gone")
+                raise OSError("sensor read error")
             return next(it)
 
         def stop():
@@ -108,27 +128,25 @@ class RunTests(unittest.TestCase):
             now[0] += 1
             seen.append(hw.target())
 
-        fb.run(cfg(interval=0.5), fb.Fan(os.path.join(hw.root, "hwmon1")),
+        cfg = {
+            "profile": "Balanced",
+            "interval": 0.5,
+            "points": [[50, 0], [70, 50], [90, 100]]
+        }
+        fb.run(cfg, fb.Fan(os.path.join(hw.root, "hwmon1")),
                read, clock=lambda: now[0], sleep=sleep, stop=stop)
         return seen
 
     def test_boost_then_exit_writes_zero(self):
         hw = FakeHwmon(self)
-        seen = self.run_loop([50, 72, 72, 65], hw)
-        self.assertEqual(seen, [0, 3200, 3200, 3200])
-        self.assertEqual(hw.target(), 0)
-
-    def test_release_after_hold(self):
-        hw = FakeHwmon(self)
-        seen = self.run_loop([72] + [50] * 12, hw)
-        self.assertEqual(seen[0], 3200)
-        self.assertEqual(seen[-1], 0)
+        seen = self.run_loop([40, 70, 70, 40], hw)
+        self.assertEqual(seen, [0, 2000, 2000, 0])
         self.assertEqual(hw.target(), 0)
 
     def test_sensor_fault_releases(self):
         hw = FakeHwmon(self)
-        seen = self.run_loop([72, 72, 72], hw, fail_at=2)
-        self.assertEqual(seen[:2], [3200, 0])
+        seen = self.run_loop([70, 70, 70], hw, fail_at=2)
+        self.assertEqual(seen[:2], [2000, 0])
 
     def test_exception_still_writes_zero(self):
         hw = FakeHwmon(self)
@@ -138,8 +156,13 @@ class RunTests(unittest.TestCase):
             fan.set(3200)
             raise KeyboardInterrupt
 
+        cfg = {
+            "profile": "Balanced",
+            "interval": 0.5,
+            "points": [[50, 0], [90, 100]]
+        }
         with self.assertRaises(KeyboardInterrupt):
-            fb.run(cfg(), fan, read, sleep=lambda _: None)
+            fb.run(cfg, fan, read, sleep=lambda _: None)
         self.assertEqual(hw.target(), 0)
 
 
@@ -150,7 +173,7 @@ class CliTests(unittest.TestCase):
         cli.systemctl = lambda *a: (self.calls.append(a), (0, "active"))[1]
         self.addCleanup(setattr, cli, "systemctl", self.orig)
 
-    def config(self, text='[fanboost]\non = 65.0\nlevel = "high"   # comment\n'):
+    def config(self, text='[fanboost]\nprofile = "Balanced"\n'):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
         p = os.path.join(d.name, "c.toml")
@@ -162,26 +185,27 @@ class CliTests(unittest.TestCase):
         hw = FakeHwmon(self)
         a = cli.main.__globals__["argparse"].Namespace(hwmon_root=hw.root)
         self.assertIn("auto", cli.status_line(a))
-        fb.Fan(os.path.join(hw.root, "hwmon1")).set(3200)
+        fb.Fan(os.path.join(hw.root, "hwmon1")).set(2600)
         self.assertIn("boost", cli.status_line(a))
+        self.assertIn("65%", cli.status_line(a))
 
-    def test_level_rewrites_config_and_restarts(self):
+    def test_profile_rewrites_config_and_restarts(self):
         p = self.config()
         orig = os.geteuid
         os.geteuid = lambda: 0
         self.addCleanup(setattr, os, "geteuid", orig)
-        cli.main(["--config", p, "level", "low"])
+        cli.main(["--config", p, "profile", "Quiet"])
         with open(p) as f:
             text = f.read()
-        self.assertIn('level = "low"   # comment', text)
+        self.assertIn('profile = "Quiet"', text)
         self.assertIn(("restart", cli.SERVICE), self.calls)
 
-    def test_level_requires_root(self):
+    def test_profile_requires_root(self):
         orig = os.geteuid
         os.geteuid = lambda: 1000
         self.addCleanup(setattr, os, "geteuid", orig)
         with self.assertRaises(SystemExit):
-            cli.main(["--config", self.config(), "level", "low"])
+            cli.main(["--config", self.config(), "profile", "Quiet"])
 
     def test_find_hwmon(self):
         hw = FakeHwmon(self)

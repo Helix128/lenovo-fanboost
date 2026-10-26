@@ -92,6 +92,8 @@ static umode_t fb_is_visible(const void *data, enum hwmon_sensor_types type,
 		return rpm_per_unit ? 0444 : 0;
 	case hwmon_fan_target:
 		return 0644;
+	case hwmon_fan_max:
+		return 0444;
 	}
 	return 0;
 }
@@ -114,6 +116,9 @@ static int fb_read(struct device *dev, enum hwmon_sensor_types type, u32 attr,
 		mutex_lock(&d->lock);
 		*val = d->target;
 		mutex_unlock(&d->lock);
+		return 0;
+	case hwmon_fan_max:
+		*val = d->quirk->max_rpm;
 		return 0;
 	}
 	return -EOPNOTSUPP;
@@ -144,7 +149,7 @@ static const struct hwmon_ops fb_ops = {
 };
 
 static const struct hwmon_channel_info * const fb_info[] = {
-	HWMON_CHANNEL_INFO(fan, HWMON_F_INPUT | HWMON_F_TARGET),
+	HWMON_CHANNEL_INFO(fan, HWMON_F_INPUT | HWMON_F_TARGET | HWMON_F_MAX),
 	NULL
 };
 

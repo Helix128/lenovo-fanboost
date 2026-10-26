@@ -12,9 +12,9 @@ Initial testing was done on a **ThinkBook 14 G7 ARP** (`21MV`, BIOS `P6CN38WW`),
 
 The project is split into three main parts:
 
-- `kernel/lenovo_fanboost.c`: Kernel driver exposing a standard `hwmon` interface. Writing a target RPM (between 0 and 4000) to `fan1_target` invokes the ACPI method `\_SB.WMI5.WMLA(0, 0x12, {0x04030001, rpm})`. Writing `0` immediately hands fan control back to the EC. It also exposes `fan1_raw` to read EC register `0x95`.
-- `daemon/lenovo-fanboostd`: Background daemon that reads CPU temperature (`Tctl` via `k10temp`) and applies configurable hysteresis (`on`, `off`, `hold`) across predefined fan levels (`low`, `medium`, `high`).
-- `daemon/lenovo-fanboost`: CLI utility to check live telemetry, switch fan levels on the fly, and manage the systemd service.
+- `kernel/lenovo_fanboost.c`: Kernel driver exposing a standard `hwmon` interface. Writing a target RPM to `fan1_target` invokes the ACPI method `\_SB.WMI5.WMLA(0, 0x12, {0x04030001, rpm})`. Writing `0` immediately hands fan control back to the EC. It also exposes `fan1_max` (model-specific maximum RPM) and `fan1_raw` to read EC register `0x95`.
+- `daemon/lenovo-fanboostd`: Background daemon that reads CPU temperature (`Tctl` via `k10temp`) and continuously interpolates percentage-based fan curves mapped to the laptop's hardware RPM range.
+- `daemon/lenovo-fanboost`: CLI utility to check live telemetry, switch fan profiles (`Quiet`, `Balanced`, `Aggressive`), and control service state (`Active` / `Inactive (EC Mode)`).
 
 ## Compatibility and roadmap
 
@@ -30,11 +30,11 @@ Detailed model tiers and instructions for testing new hardware are documented in
 ## Usage
 
 ```sh
-lenovo-fanboost                 # View service status, profile, temperature, and fan state
-lenovo-fanboost watch           # Live view, refreshes every second
-sudo lenovo-fanboost level high # Switch profile: low (60%), medium (80%), high (100%)
-sudo lenovo-fanboost off        # Stop service and return fan control to the EC
-sudo lenovo-fanboost on         # Enable service now and at system boot
+lenovo-fanboost                      # View state (Active / Inactive), profile, and fan telemetry
+lenovo-fanboost watch                # Live telemetry stream, refreshes once per second
+sudo lenovo-fanboost profile Quiet   # Switch curve profile: Quiet, Balanced, or Aggressive
+sudo lenovo-fanboost off             # Stop service and return fan control to EC Mode
+sudo lenovo-fanboost on              # Enable service now and at system boot
 ```
 
 ## Configuration
@@ -43,16 +43,25 @@ Configuration lives at `/etc/lenovo-fanboost.toml`:
 
 ```toml
 [fanboost]
-on = 65.0       # Temperature to trigger fan boost (°C)
-off = 55.0      # Temperature threshold to begin cooldown (°C)
-hold = 15.0     # Seconds temperature must stay below 'off' before returning control to EC
-level = "high"  # Fan profile: low, medium, or high
-interval = 0.5  # Polling interval in seconds
+profile = "Balanced"
+interval = 0.5
+
+[profiles.Quiet]
+# Temperature in °C vs fan speed in % (0% = EC automatic control)
+points = [[40, 0], [60, 0], [70, 45], [80, 65], [90, 90], [95, 100]]
+
+[profiles.Balanced]
+points = [[40, 0], [50, 0], [60, 45], [70, 65], [80, 85], [90, 100]]
+
+[profiles.Aggressive]
+points = [[40, 0], [45, 40], [55, 60], [65, 80], [75, 100], [95, 100]]
 ```
+
+Curves use percentages `[temperature_celsius, percent_0_to_100]`. The driver defines the maximum hardware RPM for each supported laptop model, so the same profile scales cleanly across different laptops.
 
 ## Safety and recovery
 
-- The kernel module caps fan requests between 0 and 4000 RPM.
+- The kernel module caps fan requests between 0 and the model's `max_rpm`.
 - Automatic EC control (`0`) is requested when the driver loads, before it unloads, and during system shutdown or suspend.
 - If the daemon crashes or the thermal sensor fails to read, control drops back to the EC immediately. The systemd unit also enforces an EC reset via `ExecStopPost`.
 - Hardware thermal safety mechanisms built into the CPU and EC remain active at all times.

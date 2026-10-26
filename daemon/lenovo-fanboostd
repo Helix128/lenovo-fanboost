@@ -1,10 +1,9 @@
 #!/usr/bin/python3 -I
-"""lenovo-fanboostd: policy daemon (run by systemd). Raises the fan early from CPU Tctl.
+"""lenovo-fanboostd: policy daemon (run by systemd).
 
-Users should run the `lenovo-fanboost` CLI instead.
-
-Talks only to the lenovo_fanboost hwmon (fan1_target). Never requests less
-than automatic: target is either 0 (EC control) or a fixed level.
+Continuously evaluates CPU temperature against an active fan curve profile,
+interpolating target percentages, converting to laptop-specific hardware RPMs,
+and setting fan1_target on the lenovo_fanboost hwmon device.
 """
 import argparse
 import glob
@@ -14,12 +13,26 @@ import sys
 import time
 import tomllib
 
-MAX_RPM = 4000
-LEVELS = {"low": 0.60, "medium": 0.80, "high": 1.00}
-DEFAULTS = {"on": 70.0, "off": 60.0, "hold": 15.0, "level": "medium",
-            "interval": 0.5}
-CONFIG = "/etc/lenovo-fanboost.toml"
 HWMON_ROOT = "/sys/class/hwmon"
+CONFIG = "/etc/lenovo-fanboost.toml"
+
+DEFAULT_PROFILES = {
+    "Quiet": [
+        [40, 0], [60, 0], [70, 45], [80, 65], [90, 90], [95, 100]
+    ],
+    "Balanced": [
+        [40, 0], [50, 0], [60, 45], [70, 65], [80, 85], [90, 100]
+    ],
+    "Aggressive": [
+        [40, 0], [45, 40], [55, 60], [65, 80], [75, 100], [95, 100]
+    ]
+}
+
+LEGACY_MAP = {
+    "low": "Quiet",
+    "medium": "Balanced",
+    "high": "Aggressive"
+}
 
 
 def find_hwmon(name, root=HWMON_ROOT):
@@ -33,38 +46,104 @@ def find_hwmon(name, root=HWMON_ROOT):
     return None
 
 
-def level_rpm(level):
-    return int(MAX_RPM * LEVELS[level])
+def clamp(val, min_val, max_val):
+    return max(min_val, min(max_val, val))
+
+
+def interpolate_percent(points, temp):
+    """Interpolate fan percentage (0.0 - 100.0) from [temp, percent] curve points."""
+    if not points:
+        return 0.0
+    if temp <= points[0][0]:
+        return float(clamp(points[0][1], 0.0, 100.0))
+    if temp >= points[-1][0]:
+        return float(clamp(points[-1][1], 0.0, 100.0))
+
+    for i in range(len(points) - 1):
+        t0, p0 = points[i]
+        t1, p1 = points[i + 1]
+        if t0 <= temp <= t1:
+            if t1 == t0:
+                pct = p0
+            else:
+                pct = p0 + ((temp - t0) / (t1 - t0)) * (p1 - p0)
+            return float(clamp(pct, 0.0, 100.0))
+    return 0.0
+
+
+def percent_to_rpm(percent, max_rpm=4000):
+    """Convert a target fan percentage (0-100) to quantized RPM."""
+    if percent <= 0.0 or max_rpm <= 0:
+        return 0
+    raw_rpm = (percent / 100.0) * max_rpm
+    quantized = int(round(raw_rpm / 50.0)) * 50
+    return int(clamp(quantized, 0, max_rpm))
+
+
+def interpolate_curve(points, temp, max_rpm=4000):
+    """Linearly interpolate target RPM from a list of [temp, percent] pairs."""
+    pct = interpolate_percent(points, temp)
+    return percent_to_rpm(pct, max_rpm)
 
 
 def load_config(path):
-    cfg = dict(DEFAULTS)
+    raw = {}
     try:
         with open(path, "rb") as f:
-            cfg.update(tomllib.load(f).get("fanboost", {}))
+            raw = tomllib.load(f)
     except FileNotFoundError:
         pass
-    unknown = set(cfg) - set(DEFAULTS)
-    if unknown:
-        raise ValueError(f"unknown keys: {sorted(unknown)}")
-    return validate(cfg)
 
+    fb_sec = raw.get("fanboost", {})
+    profiles = dict(DEFAULT_PROFILES)
+    for name, pdata in raw.get("profiles", {}).items():
+        if isinstance(pdata, dict) and "points" in pdata:
+            profiles[name] = pdata["points"]
 
-def validate(cfg):
-    if cfg["level"] not in LEVELS:
-        raise ValueError(f"level must be one of {sorted(LEVELS)}")
-    for k in ("on", "off", "hold", "interval"):
-        cfg[k] = float(cfg[k])
-    if not 30 <= cfg["off"] < cfg["on"] <= 95:
-        raise ValueError("need 30 <= off < on <= 95")
-    if cfg["hold"] < 0 or not 0.05 <= cfg["interval"] <= 10:
-        raise ValueError("hold >= 0 and 0.05 <= interval <= 10")
-    return cfg
+    profile_name = fb_sec.get("profile")
+    if not profile_name and "level" in fb_sec:
+        profile_name = LEGACY_MAP.get(fb_sec["level"], "Balanced")
+    if not profile_name or profile_name not in profiles:
+        profile_name = "Balanced"
+
+    interval = float(fb_sec.get("interval", 0.5))
+    if not 0.05 <= interval <= 10.0:
+        interval = 0.5
+
+    points = profiles[profile_name]
+    clean_points = []
+    for pt in points:
+        if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+            t = float(pt[0])
+            p = float(clamp(float(pt[1]), 0.0, 100.0))
+            clean_points.append([t, p])
+    clean_points.sort(key=lambda p: p[0])
+    if not clean_points:
+        clean_points = DEFAULT_PROFILES["Balanced"]
+
+    return {
+        "profile": profile_name,
+        "interval": interval,
+        "points": clean_points,
+        "profiles": profiles
+    }
 
 
 class Fan:
     def __init__(self, hwmon):
         self.target = os.path.join(hwmon, "fan1_target")
+        self.max_path = os.path.join(hwmon, "fan1_max")
+        self.max_rpm = self._read_max()
+
+    def _read_max(self):
+        try:
+            with open(self.max_path) as f:
+                val = int(f.read().strip())
+                if val > 0:
+                    return val
+        except (OSError, ValueError):
+            pass
+        return 4000
 
     def set(self, rpm):
         with open(self.target, "w") as f:
@@ -75,53 +154,40 @@ class Fan:
             return int(f.read())
 
 
-class Controller:
-    """Hysteresis: boost at temp >= on; release after hold s below off."""
+class CurveController:
+    """Evaluates continuous fan curve and emits target RPM changes."""
 
-    def __init__(self, cfg):
-        self.on, self.off, self.hold = cfg["on"], cfg["off"], cfg["hold"]
-        self.rpm = level_rpm(cfg["level"])
-        self.boosted = False
-        self.below_since = None
+    def __init__(self, points, max_rpm=4000):
+        self.points = sorted(points, key=lambda p: p[0])
+        self.max_rpm = max_rpm
+        self.current_target = 0
 
-    def step(self, temp, now):
-        """Return 'boost', 'auto' or None (no change)."""
-        if not self.boosted:
-            if temp >= self.on:
-                self.boosted, self.below_since = True, None
-                return "boost"
-        elif temp < self.off:
-            if self.below_since is None:
-                self.below_since = now
-            if now - self.below_since >= self.hold:
-                self.boosted = False
-                return "auto"
-        else:
-            self.below_since = None
+    def step(self, temp):
+        target = interpolate_curve(self.points, temp, self.max_rpm)
+        if target != self.current_target:
+            self.current_target = target
+            return target
         return None
 
     def fault(self):
-        """Sensor unavailable: hand back to the EC."""
-        was, self.boosted, self.below_since = self.boosted, False, None
-        return "auto" if was else None
+        """Sensor unavailable: return control to EC."""
+        if self.current_target != 0:
+            self.current_target = 0
+            return 0
+        return None
 
 
 def log(msg):
     print(msg, flush=True)
 
 
-def apply(fan, ctl, action, temp):
-    rpm = ctl.rpm if action == "boost" else 0
-    fan.set(rpm)
-    log(f"{action} tctl={temp:.1f} target={rpm}")
-
-
 def run(cfg, fan, read_temp, clock=time.monotonic, sleep=time.sleep,
         stop=lambda: False):
-    ctl = Controller(cfg)
+    max_rpm = getattr(fan, "max_rpm", 4000)
+    ctl = CurveController(cfg["points"], max_rpm=max_rpm)
     fan.set(0)
-    log(f"start on={cfg['on']} off={cfg['off']} hold={cfg['hold']} "
-        f"level={cfg['level']} rpm={ctl.rpm}")
+    log(f"start profile={cfg['profile']} max_rpm={max_rpm} "
+        f"interval={cfg['interval']}s points={cfg['points']}")
     faulted = False
     try:
         while not stop():
@@ -134,13 +200,19 @@ def run(cfg, fan, read_temp, clock=time.monotonic, sleep=time.sleep,
                 if not faulted:
                     log("sensor error, releasing to auto")
                 faulted = True
-                if ctl.fault():
+                if ctl.fault() is not None:
                     fan.set(0)
                 sleep(cfg["interval"])
                 continue
-            action = ctl.step(t, clock())
-            if action:
-                apply(fan, ctl, action, t)
+
+            target = ctl.step(t)
+            if target is not None:
+                fan.set(target)
+                if target > 0:
+                    pct = (target / max_rpm) * 100 if max_rpm > 0 else 0
+                    log(f"boost tctl={t:.1f} target={target} ({pct:.0f}%)")
+                else:
+                    log(f"auto tctl={t:.1f} (EC control)")
             sleep(cfg["interval"])
     finally:
         try:
@@ -155,18 +227,20 @@ def main(argv=None):
     ap.add_argument("--config", default=CONFIG)
     ap.add_argument("--hwmon-root", default=HWMON_ROOT)
     a = ap.parse_args(argv)
+
     try:
         cfg = load_config(a.config)
     except (ValueError, tomllib.TOMLDecodeError, OSError) as e:
         sys.exit(f"config error: {e}")
+
     fh = find_hwmon("lenovo_fanboost", a.hwmon_root)
     kt = find_hwmon("k10temp", a.hwmon_root)
     if not fh or not kt:
         sys.exit("hwmon lenovo_fanboost or k10temp not found")
     if not os.access(os.path.join(fh, "fan1_target"), os.W_OK):
-        sys.exit("lenovo-fanboostd is the system daemon and needs root.\n"
-                 "It normally runs as lenovo-fanboost.service; use the "
-                 "`lenovo-fanboost` command to check or change it.")
+        sys.exit("lenovo-fanboostd needs root permissions to set fan speeds.\n"
+                 "It runs as lenovo-fanboost.service; use `lenovo-fanboost` CLI.")
+
     tpath = os.path.join(kt, "temp1_input")
 
     def read_temp():
