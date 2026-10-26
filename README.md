@@ -104,6 +104,9 @@ python -I -m unittest
 
 Tests use a mocked `hwmon` sysfs hierarchy and do not touch real hardware.
 
+**Disclaimer:** This is an independent, community-developed project and is not affiliated with, endorsed by, or supported by Lenovo. Lenovo® is a trademark of Lenovo.
+
+
 ## License
 
 GPL-2.0-only. See [LICENSE](LICENSE).
