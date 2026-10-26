@@ -1,12 +1,8 @@
 # lenovo-fanboost
 
-Proactive Linux fan control utility for Lenovo laptops. 
+Linux fan control for the **ThinkBook 14 G7 ARP** (`21MV`) and **ThinkBook 16 G7 ARP** (`21NW`).
 
-On many modern Lenovo laptops, the Embedded Controller (EC) manages thermal curves automatically, but reacts with a noticeable delay of around 20 to 25 seconds when a heavy workload hits the CPU. During bursty compiles or demanding tasks, temperatures can spike straight to 100 °C and trigger thermal throttling long before the fans spin up to full speed.
-
-This project addresses that gap by coupling an out-of-tree kernel module with a lightweight userspace daemon. The driver calls Lenovo's ACPI firmware methods directly to request higher fan speeds ahead of time, then smoothly restores automatic EC control once the CPU cools down.
-
-Initial testing was done on a **ThinkBook 14 G7 ARP** (`21MV`, BIOS `P6CN38WW`), dropping peak compile temperatures from 100 °C (throttling) to a stable 92.9 °C. The goal is to extend support to additional Lenovo laptops (other ThinkBook, Yoga, and IdeaPad models) sharing compatible ACPI/WMI thermal interfaces.
+The project includes a DKMS kernel module, a userspace daemon, and a CLI. The daemon follows percentage-based fan curves using CPU temperature and the model's maximum fan speed. The driver uses a DMI whitelist and does not load on unlisted models.
 
 ## How it works
 
