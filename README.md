@@ -64,15 +64,21 @@ Curves use percentages `[temperature_celsius, percent_0_to_100]`. The driver def
 
 ## Installation (Arch / CachyOS)
 
-Install via DKMS:
+Install the headers for your running kernel, then install the package from AUR and enable the service:
+
+```sh
+yay -S lenovo-fanboost
+sudo lenovo-fanboost on
+```
+
+To build the package locally instead:
 
 ```sh
 cd packaging
 makepkg -si
-sudo lenovo-fanboost on
 ```
 
-`dkms.conf` automatically chooses clang or gcc depending on how the installed kernel was built (standard in CachyOS vs Arch stock).
+DKMS chooses clang or gcc to match the installed kernel.
 
 ## Manual recovery & uninstallation
 
