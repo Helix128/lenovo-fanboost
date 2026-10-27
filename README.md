@@ -8,7 +8,7 @@ The project includes a DKMS kernel module, a userspace daemon, and a CLI. The da
 
 The project is split into three main parts:
 
-- `kernel/lenovo_fanboost.c`: Kernel driver exposing a standard `hwmon` interface. Writing a target RPM to `fan1_target` invokes the ACPI method `\_SB.WMI5.WMLA(0, 0x12, {0x04030001, rpm})`. Writing `0` immediately hands fan control back to the EC. It also exposes `fan1_max` (model-specific maximum RPM) and `fan1_raw` to read EC register `0x95`.
+- `kernel/lenovo_fanboost.c`: Kernel driver exposing a standard `hwmon` interface. Writing a target RPM to `fan1_target` converts it to a raw EC fan level and invokes the ACPI method `\_SB.WMI5.WMLA(0, 0x12, {0x04030001, level})`. Any non-zero target runs at least at `fan1_min` (the firmware stops the fan below that level) and at most at `fan1_max`; reading `fan1_target` returns the effective value. Writing `0` immediately hands fan control back to the EC. `fan1_input` reports speed from EC register `0x95` (also raw as `fan1_raw`); RPM values use a nominal 50 RPM per EC unit.
 - `daemon/lenovo-fanboostd`: Background daemon that reads CPU temperature (`Tctl` via `k10temp`) and continuously interpolates percentage-based fan curves mapped to the laptop's hardware RPM range.
 - `daemon/lenovo-fanboost`: CLI utility to check live telemetry, switch fan profiles (`Quiet`, `Balanced`, `Aggressive`), and control service state (`Active` / `Inactive (EC Mode)`).
 

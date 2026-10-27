@@ -5,7 +5,9 @@
  * Mechanism only. Requests a fan speed through the firmware WMI method
  * \_SB.WMI5.WMLA(0, 0x12, {SIDS=0x04030001, SVAL=level}); level 0 returns the
  * fan to automatic EC control. SVAL is a raw EC fan level (firmware keeps only
- * the low byte), so fan1_target RPM is scaled to 1..max_level. Policy lives in user space (lenovo-fanboost).
+ * the low byte); levels below min_level stop the fan, levels above max_level
+ * saturate. EC 0x95 tracks the level 1:1, so RPM = level * rpm_per_unit
+ * (nominal: speed is proportional to level, absolute scale unverified). Policy lives in user space (lenovo-fanboost).
  * The GUID bound by lenovo_wmi_other is not touched; the method is called
  * directly through ACPI.
  */
@@ -26,14 +28,11 @@ struct lenovo_fan_quirk {
 	const char *method;
 	u32 set_cmd;
 	u32 sid_fan1;
-	u16 max_rpm;
-	u8 max_level;	/* EC level where fan speed saturates */
+	u8 min_level;	/* lowest level that keeps the fan spinning */
+	u8 max_level;	/* level where fan speed saturates */
+	u8 rpm_per_unit;
 	u8 ec_fan_reg;
 };
-
-static unsigned int rpm_per_unit;
-module_param(rpm_per_unit, uint, 0444);
-MODULE_PARM_DESC(rpm_per_unit, "RPM per EC unit; fan1_input exists only if non-zero (unverified, ~50)");
 
 struct fb_data {
 	acpi_handle handle;
@@ -44,18 +43,12 @@ struct fb_data {
 
 static struct platform_device *fb_pdev;
 
-static int fb_request(struct fb_data *d, u32 rpm)
+static int fb_request(struct fb_data *d, u32 level)
 {
 	union acpi_object args[3];
 	struct acpi_object_list list = { .count = 3, .pointer = args };
 	u8 buf[8];
 	acpi_status st;
-	u32 level = 0;
-
-	if (rpm)
-		level = clamp_val(DIV_ROUND_CLOSEST(rpm * d->quirk->max_level,
-						    d->quirk->max_rpm),
-				  1, d->quirk->max_level);
 
 	put_unaligned_le32(d->quirk->sid_fan1, buf);
 	put_unaligned_le32(level, buf + 4);
@@ -96,10 +89,10 @@ static umode_t fb_is_visible(const void *data, enum hwmon_sensor_types type,
 	if (type != hwmon_fan || channel)
 		return 0;
 	switch (attr) {
-	case hwmon_fan_input:
-		return rpm_per_unit ? 0444 : 0;
 	case hwmon_fan_target:
 		return 0644;
+	case hwmon_fan_input:
+	case hwmon_fan_min:
 	case hwmon_fan_max:
 		return 0444;
 	}
@@ -110,6 +103,7 @@ static int fb_read(struct device *dev, enum hwmon_sensor_types type, u32 attr,
 		   int channel, long *val)
 {
 	struct fb_data *d = dev_get_drvdata(dev);
+	const struct lenovo_fan_quirk *q = d->quirk;
 	u8 v;
 	int ret;
 
@@ -118,15 +112,18 @@ static int fb_read(struct device *dev, enum hwmon_sensor_types type, u32 attr,
 		ret = ec_read(d->quirk->ec_fan_reg, &v);
 		if (ret)
 			return ret;
-		*val = (long)v * rpm_per_unit;
+		*val = (long)v * q->rpm_per_unit;
 		return 0;
 	case hwmon_fan_target:
 		mutex_lock(&d->lock);
 		*val = d->target;
 		mutex_unlock(&d->lock);
 		return 0;
+	case hwmon_fan_min:
+		*val = q->min_level * q->rpm_per_unit;
+		return 0;
 	case hwmon_fan_max:
-		*val = d->quirk->max_rpm;
+		*val = q->max_level * q->rpm_per_unit;
 		return 0;
 	}
 	return -EOPNOTSUPP;
@@ -136,16 +133,21 @@ static int fb_write(struct device *dev, enum hwmon_sensor_types type, u32 attr,
 		    int channel, long val)
 {
 	struct fb_data *d = dev_get_drvdata(dev);
+	const struct lenovo_fan_quirk *q = d->quirk;
+	u32 level = 0;
 	int ret;
 
 	if (attr != hwmon_fan_target)
 		return -EOPNOTSUPP;
 
-	val = clamp_val(val, 0, d->quirk->max_rpm);
+	/* 0 = automatic; any other value runs at least at min_level */
+	if (val > 0)
+		level = clamp_val(DIV_ROUND_CLOSEST(val, q->rpm_per_unit),
+				  q->min_level, q->max_level);
 	mutex_lock(&d->lock);
-	ret = fb_request(d, val);
+	ret = fb_request(d, level);
 	if (!ret)
-		d->target = val;
+		d->target = level * q->rpm_per_unit;
 	mutex_unlock(&d->lock);
 	return ret;
 }
@@ -157,7 +159,8 @@ static const struct hwmon_ops fb_ops = {
 };
 
 static const struct hwmon_channel_info * const fb_info[] = {
-	HWMON_CHANNEL_INFO(fan, HWMON_F_INPUT | HWMON_F_TARGET | HWMON_F_MAX),
+	HWMON_CHANNEL_INFO(fan, HWMON_F_INPUT | HWMON_F_TARGET | HWMON_F_MIN |
+				HWMON_F_MAX),
 	NULL
 };
 
@@ -180,8 +183,9 @@ static const struct lenovo_fan_quirk quirk_thinkbook_14_g7 = {
 	.method = "\\_SB.WMI5.WMLA",
 	.set_cmd = 0x12,
 	.sid_fan1 = 0x04030001,
-	.max_rpm = 4000,
+	.min_level = 35,
 	.max_level = 94,
+	.rpm_per_unit = 50,
 	.ec_fan_reg = 0x95,
 };
 
@@ -190,8 +194,9 @@ static const struct lenovo_fan_quirk quirk_thinkbook_16_g7 = {
 	.method = "\\_SB.WMI5.WMLA",
 	.set_cmd = 0x12,
 	.sid_fan1 = 0x04030001,
-	.max_rpm = 4000,
+	.min_level = 35,
 	.max_level = 94,
+	.rpm_per_unit = 50,
 	.ec_fan_reg = 0x95,
 };
 
