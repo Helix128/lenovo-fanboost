@@ -78,10 +78,12 @@ def status_line(a):
     t = rd(kt, "temp1_input")
     target = rd(fan, "fan1_target")
     max_rpm = rd(fan, "fan1_max") or "4000"
+    min_rpm = rd(fan, "fan1_min") or "0"
     mode = "boost" if target not in (None, "0") else "auto"
     pct_str = ""
-    if target and target.isdigit() and int(target) > 0 and max_rpm.isdigit() and int(max_rpm) > 0:
-        pct = (int(target) / int(max_rpm)) * 100
+    if (target and target.isdigit() and int(target) > 0 and max_rpm.isdigit()
+            and min_rpm.isdigit() and int(max_rpm) > int(min_rpm)):
+        pct = (int(target) - int(min_rpm)) / (int(max_rpm) - int(min_rpm)) * 100
         pct_str = f" ({pct:.0f}%)"
     elif target == "0":
         pct_str = " (0%)"

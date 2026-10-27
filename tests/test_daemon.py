@@ -67,6 +67,23 @@ class CurveTests(unittest.TestCase):
         # Tiny positive percentage still boosts, never falls back to auto
         self.assertEqual(fb.percent_to_rpm(0.001, 4000), 1)
 
+    def test_percent_to_rpm_min_floor(self):
+        # Percent spans [min, max]: firmware stops the fan below min
+        self.assertEqual(fb.percent_to_rpm(0, 4700, 1750), 0)
+        self.assertEqual(fb.percent_to_rpm(0.001, 4700, 1750), 1750)
+        self.assertEqual(fb.percent_to_rpm(50, 4700, 1750), 3225)
+        self.assertEqual(fb.percent_to_rpm(100, 4700, 1750), 4700)
+
+    def test_curve_controller_release_hysteresis(self):
+        pts = [[50, 0], [60, 100]]
+        c = fb.CurveController(pts, max_rpm=4700, min_rpm=1750)
+        self.assertEqual(c.step(55), 3225)
+        self.assertEqual(c.step(49), 1750)  # curve 0%, still above 47: hold min
+        self.assertIsNone(c.step(50))  # noise around 0% point: no flap
+        self.assertIsNone(c.step(47.5))
+        self.assertEqual(c.step(46.9), 0)  # below release temp: EC auto
+        self.assertIsNone(c.step(49))  # not boosting: stays auto until curve > 0
+
     def test_curve_controller_steps(self):
         pts = [[50, 0], [60, 50], [80, 100]]
         c = fb.CurveController(pts, max_rpm=4000)

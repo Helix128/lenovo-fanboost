@@ -28,6 +28,10 @@ DEFAULT_PROFILES = {
     ]
 }
 
+# Keep minimum boost until temp falls this far below the curve's 0% point,
+# so sensor noise does not flap between boost and EC auto (which may stop the fan).
+RELEASE_HYSTERESIS = 3.0
+
 LEGACY_MAP = {
     "low": "Quiet",
     "medium": "Balanced",
@@ -71,18 +75,18 @@ def interpolate_percent(points, temp):
     return 0.0
 
 
-def percent_to_rpm(percent, max_rpm=4000):
-    """Convert a target fan percentage (0-100) to RPM (0 only for 0%)."""
+def percent_to_rpm(percent, max_rpm=4000, min_rpm=0):
+    """Map a fan percentage (0-100) onto [min_rpm, max_rpm]; 0% means auto (0)."""
     if percent <= 0.0 or max_rpm <= 0:
         return 0
-    rpm = round((percent / 100.0) * max_rpm)
-    return int(clamp(rpm, 1, max_rpm))
+    rpm = round(min_rpm + (percent / 100.0) * (max_rpm - min_rpm))
+    return int(clamp(rpm, max(min_rpm, 1), max_rpm))
 
 
-def interpolate_curve(points, temp, max_rpm=4000):
+def interpolate_curve(points, temp, max_rpm=4000, min_rpm=0):
     """Linearly interpolate target RPM from a list of [temp, percent] pairs."""
     pct = interpolate_percent(points, temp)
-    return percent_to_rpm(pct, max_rpm)
+    return percent_to_rpm(pct, max_rpm, min_rpm)
 
 
 def load_config(path):
@@ -131,18 +135,21 @@ def load_config(path):
 class Fan:
     def __init__(self, hwmon):
         self.target = os.path.join(hwmon, "fan1_target")
-        self.max_path = os.path.join(hwmon, "fan1_max")
-        self.max_rpm = self._read_max()
+        self.max_rpm = self._read(os.path.join(hwmon, "fan1_max")) or 4000
+        self.min_rpm = self._read(os.path.join(hwmon, "fan1_min")) or 0
+        if self.min_rpm >= self.max_rpm:
+            self.min_rpm = 0
 
-    def _read_max(self):
+    @staticmethod
+    def _read(path):
         try:
-            with open(self.max_path) as f:
+            with open(path) as f:
                 val = int(f.read().strip())
                 if val > 0:
                     return val
         except (OSError, ValueError):
             pass
-        return 4000
+        return None
 
     def set(self, rpm):
         with open(self.target, "w") as f:
@@ -156,13 +163,18 @@ class Fan:
 class CurveController:
     """Evaluates continuous fan curve and emits target RPM changes."""
 
-    def __init__(self, points, max_rpm=4000):
+    def __init__(self, points, max_rpm=4000, min_rpm=0):
         self.points = sorted(points, key=lambda p: p[0])
         self.max_rpm = max_rpm
+        self.min_rpm = min_rpm
         self.current_target = 0
+        zero = [t for t, p in self.points if p <= 0]
+        self.release_temp = (zero[-1] if zero else float("-inf")) - RELEASE_HYSTERESIS
 
     def step(self, temp):
-        target = interpolate_curve(self.points, temp, self.max_rpm)
+        target = interpolate_curve(self.points, temp, self.max_rpm, self.min_rpm)
+        if target == 0 and self.current_target > 0 and temp > self.release_temp:
+            target = max(self.min_rpm, 1)
         if target != self.current_target:
             self.current_target = target
             return target
@@ -183,9 +195,10 @@ def log(msg):
 def run(cfg, fan, read_temp, clock=time.monotonic, sleep=time.sleep,
         stop=lambda: False):
     max_rpm = getattr(fan, "max_rpm", 4000)
-    ctl = CurveController(cfg["points"], max_rpm=max_rpm)
+    min_rpm = getattr(fan, "min_rpm", 0)
+    ctl = CurveController(cfg["points"], max_rpm=max_rpm, min_rpm=min_rpm)
     fan.set(0)
-    log(f"start profile={cfg['profile']} max_rpm={max_rpm} "
+    log(f"start profile={cfg['profile']} min_rpm={min_rpm} max_rpm={max_rpm} "
         f"interval={cfg['interval']}s points={cfg['points']}")
     faulted = False
     try:
@@ -208,7 +221,8 @@ def run(cfg, fan, read_temp, clock=time.monotonic, sleep=time.sleep,
             if target is not None:
                 fan.set(target)
                 if target > 0:
-                    pct = (target / max_rpm) * 100 if max_rpm > 0 else 0
+                    span = max_rpm - min_rpm
+                    pct = (target - min_rpm) / span * 100 if span > 0 else 0
                     log(f"boost tctl={t:.1f} target={target} ({pct:.0f}%)")
                 else:
                     log(f"auto tctl={t:.1f} (EC control)")
