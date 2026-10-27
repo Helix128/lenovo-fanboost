@@ -3,8 +3,9 @@
  * lenovo_fanboost - fan speed request/readback for Lenovo laptops
  *
  * Mechanism only. Requests a fan speed through the firmware WMI method
- * \_SB.WMI5.WMLA(0, 0x12, {SIDS=0x04030001, SVAL=rpm}); rpm 0 returns the fan
- * to automatic EC control. Policy lives in user space (lenovo-fanboost).
+ * \_SB.WMI5.WMLA(0, 0x12, {SIDS=0x04030001, SVAL=level}); level 0 returns the
+ * fan to automatic EC control. SVAL is a raw EC fan level (firmware keeps only
+ * the low byte), so fan1_target RPM is scaled to 1..max_level. Policy lives in user space (lenovo-fanboost).
  * The GUID bound by lenovo_wmi_other is not touched; the method is called
  * directly through ACPI.
  */
@@ -26,6 +27,7 @@ struct lenovo_fan_quirk {
 	u32 set_cmd;
 	u32 sid_fan1;
 	u16 max_rpm;
+	u8 max_level;	/* EC level where fan speed saturates */
 	u8 ec_fan_reg;
 };
 
@@ -48,9 +50,15 @@ static int fb_request(struct fb_data *d, u32 rpm)
 	struct acpi_object_list list = { .count = 3, .pointer = args };
 	u8 buf[8];
 	acpi_status st;
+	u32 level = 0;
+
+	if (rpm)
+		level = clamp_val(DIV_ROUND_CLOSEST(rpm * d->quirk->max_level,
+						    d->quirk->max_rpm),
+				  1, d->quirk->max_level);
 
 	put_unaligned_le32(d->quirk->sid_fan1, buf);
-	put_unaligned_le32(rpm, buf + 4);
+	put_unaligned_le32(level, buf + 4);
 	args[0].type = ACPI_TYPE_INTEGER;
 	args[0].integer.value = 0;
 	args[1].type = ACPI_TYPE_INTEGER;
@@ -173,6 +181,7 @@ static const struct lenovo_fan_quirk quirk_thinkbook_14_g7 = {
 	.set_cmd = 0x12,
 	.sid_fan1 = 0x04030001,
 	.max_rpm = 4000,
+	.max_level = 94,
 	.ec_fan_reg = 0x95,
 };
 
@@ -182,6 +191,7 @@ static const struct lenovo_fan_quirk quirk_thinkbook_16_g7 = {
 	.set_cmd = 0x12,
 	.sid_fan1 = 0x04030001,
 	.max_rpm = 4000,
+	.max_level = 94,
 	.ec_fan_reg = 0x95,
 };
 
