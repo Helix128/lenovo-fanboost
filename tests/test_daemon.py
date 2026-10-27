@@ -61,9 +61,11 @@ class CurveTests(unittest.TestCase):
         self.assertEqual(fb.percent_to_rpm(50, 4000), 2000)
         # Test custom hardware max rpm (e.g. 5000)
         self.assertEqual(fb.percent_to_rpm(50, 5000), 2500)
-        # Test rounding to 50 RPM steps
-        # 33% of 4000 = 1320 -> round to 1300
-        self.assertEqual(fb.percent_to_rpm(33, 4000), 1300)
+        # No step quantization: 33% of 4000 = 1320
+        self.assertEqual(fb.percent_to_rpm(33, 4000), 1320)
+        self.assertEqual(fb.percent_to_rpm(33.3, 4000), 1332)
+        # Tiny positive percentage still boosts, never falls back to auto
+        self.assertEqual(fb.percent_to_rpm(0.001, 4000), 1)
 
     def test_curve_controller_steps(self):
         pts = [[50, 0], [60, 50], [80, 100]]

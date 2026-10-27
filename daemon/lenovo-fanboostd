@@ -72,12 +72,11 @@ def interpolate_percent(points, temp):
 
 
 def percent_to_rpm(percent, max_rpm=4000):
-    """Convert a target fan percentage (0-100) to quantized RPM."""
+    """Convert a target fan percentage (0-100) to RPM (0 only for 0%)."""
     if percent <= 0.0 or max_rpm <= 0:
         return 0
-    raw_rpm = (percent / 100.0) * max_rpm
-    quantized = int(round(raw_rpm / 50.0)) * 50
-    return int(clamp(quantized, 0, max_rpm))
+    rpm = round((percent / 100.0) * max_rpm)
+    return int(clamp(rpm, 1, max_rpm))
 
 
 def interpolate_curve(points, temp, max_rpm=4000):
